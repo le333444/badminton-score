@@ -123,8 +123,8 @@
   .sheet h2 small{color:var(--muted);font-weight:400;font-size:12px;margin-left:8px;}
   .row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line);}
   .row:last-of-type{border-bottom:none;}
-  .row .lab{font-size:14px;}
-  .row .lab small{display:block;color:var(--muted);font-size:11.5px;margin-top:3px;}
+  .row .lab{font-size:14px;min-width:0;flex:1 1 auto;}
+  .row .lab small{display:block;color:var(--muted);font-size:11.5px;margin-top:3px;line-height:1.5;word-break:break-word;}
   .switch{position:relative;width:52px;height:30px;flex:0 0 auto;}
   .switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;}
   .track{position:absolute;inset:0;border-radius:999px;background:#39445a;transition:background .2s;}
@@ -233,6 +233,16 @@
   </div>
 
   <div class="row">
+    <div class="lab">无语音时用提示音<small>浏览器没有中文语音引擎时，用高低音把比分“敲”出来</small></div>
+    <label class="switch"><input type="checkbox" id="optBeep"><span class="track"><span class="knob"></span></span></label>
+  </div>
+
+  <div class="row">
+    <div class="lab">当前状态<small id="voiceState">检测中…</small></div>
+    <button class="iconbtn" id="btnDiag" style="height:34px;font-size:13px;">诊断</button>
+  </div>
+
+  <div class="row">
     <div class="lab">播报节奏<small>语速快慢</small></div>
     <input type="range" id="optRate" min="0.6" max="1.4" step="0.05">
   </div>
@@ -264,7 +274,8 @@
   </div>
 
   <div class="hint" id="hintText">
-    小提示：手机请把媒体音量调大、并关闭静音开关；首次点一下任意按钮即可解锁语音。
+    小提示：请把手机媒体音量调大、并关闭静音开关；首次点任意地方即可解锁语音。<br>
+    OPPO / vivo / 小米等自带浏览器往往没有中文语音引擎，此时会自动改用<b>提示音</b>播报比分（高音=先出现的那方）。若想要真人中文朗读，可换成 Chrome 浏览器打开本页。
   </div>
 </div>
 
@@ -317,6 +328,7 @@ var S = {
   autoServe: true,
   name: { A: 'A 队', B: 'B 队' },
   sound: true,
+  beep: true,
   rate: 1.0
 };
 var history = [];
@@ -340,29 +352,75 @@ function load(){
       S.autoServe = o.autoServe !== false;
       S.name = { A: (o.name && o.name.A) || 'A 队', B: (o.name && o.name.B) || 'B 队' };
       S.sound = o.sound !== false;
+      S.beep = o.beep !== false;
       S.rate = typeof o.rate === 'number' ? o.rate : 1.0;
     }
   } catch (e) {}
 }
 
 /* ============ 语音 ============ */
+/* 两种“不支持”要分开：
+   1) 根本没有 speechSynthesis  → 完全没法朗读
+   2) 有对象但没有中文语音引擎  → 安卓内置内核常见，调用会静默失败
+   情况 2 会自动降级为提示音播报。 */
 var speechOK = !!window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function';
 var voices = [];
 var zhVoice = null;
+var voiceWorked = false;
+var voiceLocked = false;
+var voiceUnavailable = false;   // 浏览器确实没有可用中文引擎（与用户开关无关）
+
+function voiceMode(){
+  if (!speechOK) return 'none';
+  if (voiceLocked) return 'locked';
+  if (voiceUnavailable) return 'novoice';
+  return zhVoice ? 'zh' : 'novoice';
+}
+function hasAnyVoice(){ return voices.length > 0; }
+function voiceStatus(){
+  var m = voiceMode();
+  if (m === 'none')      return '语音：不可用（此浏览器没有语音接口）';
+  if (m === 'locked')    return '语音：待解锁（请先点一下页面任意处）';
+  if (m === 'novoice')   return '语音：无中文语音引擎，已改用提示音播报';
+  return '语音：可用 · ' + (zhVoice.name || '系统中文语音');
+}
+function refreshVoiceHint(){
+  // 注意：本函数在 $ / 元素缓存定义之前就会被调用，所以用原生查找并判空
+  var el = document.getElementById('voiceState');
+  if (el) el.textContent = voiceStatus();
+}
+function markNoVoice(){
+  if (zhVoice || voiceLocked || voiceUnavailable) return;
+  // 只标记“引擎不可用”，绝不动用户的语音开关，否则连提示音兜底都会被挡掉
+  voiceUnavailable = true;
+  refreshVoiceHint();
+  toast('此浏览器没有中文语音，已改用提示音播报', 2800);
+}
 function pickVoice(){
   try { voices = window.speechSynthesis.getVoices() || []; } catch (e) { voices = []; }
   zhVoice = null;
   for (var i = 0; i < voices.length; i++) {
     var v = voices[i], lang = (v.lang || '').toLowerCase(), nm = (v.name || '');
-    if (lang.indexOf('zh') === 0 || lang.indexOf('cmn') === 0) { zhVoice = v; break; }
-    if (/Chinese|Tingting|Meijia|Yaoyao|Xiaoxiao|Huihui|Kangkang|Mandarin/i.test(nm)) { zhVoice = v; break; }
+    if (lang.indexOf('zh') === 0 || lang.indexOf('cmn') === 0 || lang.indexOf('yue') === 0) { zhVoice = v; break; }
+    if (/Chinese|Tingting|Meijia|Yaoyao|Xiaoxiao|Huihui|Kangkang|Mandarin|中文|普通话|粤语/i.test(nm)) { zhVoice = v; break; }
   }
+  refreshVoiceHint();
 }
-if (window.speechSynthesis) {
+if (speechOK) {
   pickVoice();
-  window.speechSynthesis.onvoiceschanged = pickVoice;
-  setTimeout(pickVoice, 400);
-  setTimeout(pickVoice, 1500);
+  try { window.speechSynthesis.onvoiceschanged = pickVoice; } catch (e) {}
+  setTimeout(pickVoice, 300);
+  setTimeout(pickVoice, 1200);
+  setTimeout(pickVoice, 2500);
+}
+function voiceDiag(){
+  var lines = [];
+  lines.push('接口 speechSynthesis: ' + (speechOK ? '有' : '没有'));
+  lines.push('语音列表条数: ' + voices.length);
+  lines.push('中文语音: ' + (zhVoice ? zhVoice.name : '未找到'));
+  var c = window.AudioContext || window.webkitAudioContext;
+  lines.push('Web Audio 提示音: ' + (c ? '可用' : '不可用'));
+  return lines.join('\n');
 }
 function speak(text){
   if (!S.sound || !window.speechSynthesis || !text) return;
@@ -380,10 +438,130 @@ function speak(text){
     // 某些浏览器首次调用需要用户手势，这里静默失败
   }
 }
+/* ---- 无语音引擎时的兜底：用 Web Audio 合成“提示音节奏”播报比分 ----
+   很多安卓内置浏览器（OPPO / vivo / 小米自带）有 speechSynthesis 对象，
+   但系统里没有中文语音引擎，getVoices() 为空，调用会静默失败。
+   这种浏览器 Web Audio 一定是好的，所以用音调高低+长短把比分“敲”出来。 */
+var audioCtx = null;
+function ac(){
+  if (!audioCtx) {
+    var C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return null;
+    try { audioCtx = new C(); } catch (e) { return null; }
+  }
+  if (audioCtx.state === 'suspended' && audioCtx.resume) { try { audioCtx.resume(); } catch (e) {} }
+  return audioCtx;
+}
+var AC = {
+  strokeLow:  { f: 523,   d: 0.10, t: 'sine' },   // 个位数 1-5
+  strokeHigh: { f: 784,   d: 0.10, t: 'sine' },   // 个位数 6-9
+  ten:        { f: 1046,  d: 0.07, t: 'sine' },   // 十位标记
+  tie:        { f: 660,   d: 0.42, t: 'sine' },   // 平分
+  leadA:      { f: 988,   d: 0.16, t: 'triangle' },
+  leadB:      { f: 494,   d: 0.16, t: 'triangle' },
+  winA:       { f: 1318,  d: 0.50, t: 'triangle' },
+  winB:       { f: 392,   d: 0.50, t: 'triangle' },
+  gap:        { f: 0,     d: 0.12 },
+  pause:      { f: 0,     d: 0.34 }
+};
+function tone(freq, dur, type){
+  var c = ac(); if (!c) return;
+  var osc = c.createOscillator(), g = c.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.value = freq;
+  var t0 = c.currentTime;
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(0.30, t0 + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(g); g.connect(c.destination);
+  osc.start(t0); osc.stop(t0 + dur + 0.03);
+}
+function playSeq(seq){
+  var c = ac(); if (!c) return false;
+  var at = 0;
+  for (var i = 0; i < seq.length; i++) {
+    var s = seq[i];
+    if (!s) continue;
+    if (s.f > 0) {
+      var delay = Math.max(0, at * 1000);
+      (function(sym, ms){
+        setTimeout(function(){ tone(sym.f, sym.d, sym.t); }, ms);
+      })(s, delay);
+    }
+    at += s.d + 0.05;
+  }
+  return true;
+}
+function beepScore(){
+  var seq = [];
+  function num(n){
+    var out = [], t = Math.floor(n / 10), o = n % 10;
+    if (t === 1) out.push(AC.ten);
+    else if (t > 1) { out.push(AC.ten); out.push(t >= 6 ? AC.strokeHigh : AC.strokeLow); out.push(AC.ten); }
+    if (o > 0 || n === 0) out.push(o >= 6 ? AC.strokeHigh : AC.strokeLow);
+    return out;
+  }
+  var a = S.a, b = S.b;
+  if (a === b) { seq = seq.concat(num(a), [AC.tie]); }
+  else {
+    var hi = Math.max(a, b), lo = Math.min(a, b);
+    seq = seq.concat(num(hi), [AC.gap], num(lo), [AC.leadA]);
+    if (a < b) { seq[seq.length - 1] = AC.leadB; }
+  }
+  if (!seq.length) return false;
+  return playSeq(seq);
+}
+
+var lastText = '';
+function announceFallback(){
+  if (S.beep === false) return;
+  beepScore();
+}
+/* 把一段中文交给系统引擎朗读；silent=true 表示这是“解锁/探测”用的空朗读，
+   不参与“有没有中文引擎”的判定，也绝不互相打断真实播报。 */
+function utter(text, silent){
+  if (!speechOK) return;
+  try {
+    var synth = window.speechSynthesis;
+    var u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN';
+    if (zhVoice) { try { u.voice = zhVoice; } catch (e) {} }
+    u.rate = S.rate; u.pitch = 1; u.volume = silent ? 0 : 1;
+    if (silent) {
+      // 解锁用的探测：失败也不做任何降级判断
+      if (synth.speaking || synth.pending) { try { synth.cancel(); } catch (e) {} }
+      synth.speak(u);
+      return;
+    }
+    u.onerror = function(ev){
+      var e = (ev && ev.error) || '';
+      if (e === 'not-allowed') { voiceLocked = true; refreshVoiceHint(); return; }
+      // 安卓内核在没有中文引擎时通常报 synthesis-failed / language-unavailable
+      markNoVoice();
+    };
+    u.onstart = function(){ voiceWorked = true; };
+    if (synth.speaking || synth.pending) { try { synth.cancel(); } catch (e) {} }
+    synth.speak(u);
+    // 静默失败兜底：用户确实点了分，但引擎一声没出，就判定引擎不可用
+    setTimeout(function(){
+      if (voiceWorked || voiceLocked || voiceUnavailable) return;
+      if (!S.sound) return;
+      if (synth.speaking || synth.pending) return;
+      markNoVoice();
+    }, 1200);
+  } catch (e) {
+    if (!silent) markNoVoice();
+  }
+}
+function speak(text){
+  if (!S.sound || !text) return;
+  if (!speechOK || voiceUnavailable || voiceLocked) { announceFallback(); return; }
+  utter(text, false);
+}
 function announce(text, delay){
   if (!S.sound || !text) return;
-  if (delay) { setTimeout(function(){ speak(text); }, delay); return; }
-  speak(text);
+  var go = function(){ speak(text); };
+  if (delay) setTimeout(go, delay); else go();
 }
 
 /* ============ 界面元素 ============ */
@@ -407,6 +585,7 @@ function render(){
   elBtnSound.textContent = S.sound ? '🔊 语音' : '🔇 静音';
   elBtnSound.style.opacity = S.sound ? '1' : '.6';
   elOptSound.checked = S.sound;
+  $('optBeep').checked = S.beep !== false;
   $('inpA').placeholder = 'A 队';
   $('inpB').placeholder = 'B 队';
 }
@@ -579,7 +758,16 @@ bindTap($('btnServe'), function(){
   render(); save();
   toast('发球方：' + nameOf(S.serve));
 });
-bindTap($('btnTest'), function(){ speak('测试播报，当前比分，' + sayScoreText()); });
+bindTap($('btnTest'), function(){
+  if (speechOK) speak('测试播报，当前比分，' + sayScoreText());
+  else { beepScore(); toast('此浏览器无语音引擎，正在播放提示音'); }
+});
+bindTap($('btnDiag'), function(){
+  var txt = voiceDiag();
+  alert('语音能力诊断\n\n' + txt + '\n\n' + voiceStatus() +
+        '\n\n说明：如果“接口”为有、“语音列表条数”为 0，就是浏览器缺少中文语音引擎，' +
+        '此时本页会自动改用提示音播报。想要真人中文朗读，请用 Chrome 打开本页。');
+});
 bindTap($('btnNewGame'), function(){ elScrim.classList.remove('show'); elSheet.classList.remove('show'); nextGame(); });
 bindTap($('btnFullReset'), function(){ fullReset(); });
 bindTap($('btnNextGame'), nextGame);
@@ -589,7 +777,15 @@ elScrim.addEventListener('click', function(){ elScrim.classList.remove('show'); 
 /* 设置项 */
 elOptSound.addEventListener('change', function(){
   S.sound = elOptSound.checked; render(); save();
-  if (S.sound) speak('语音播报已开启');
+  if (S.sound) {
+    if (speechOK) speak('语音播报已开启');
+    else { beepScore(); toast('已开启提示音播报'); }
+  }
+});
+$('optBeep').addEventListener('change', function(){
+  S.beep = this.checked; save();
+  if (S.beep) { beepScore(); toast('提示音播报已开启'); }
+  else { toast('提示音播报已关闭'); }
 });
 $('optRate').addEventListener('input', function(){
   S.rate = parseFloat(this.value) || 1; save();
@@ -649,18 +845,35 @@ if (S.win === 11) { document.querySelectorAll('#segRule button').forEach(functio
 else if (S.win === 15) { document.querySelectorAll('#segRule button').forEach(function(b,i){ b.classList.toggle('on', i === 2); }); }
 if (S.games.length && S.a === 0 && S.b === 0) gameOver = false;
 
-/* 首次交互解锁语音（iOS 需要） */
+/* 解锁 iOS 音频用的静音朗读：独立实现，绝不参与“有没有引擎”的判定 */
+function warmUp(){ utter(' ', true); }
+
+/* 首次交互解锁语音（iOS / 安卓都需要） */
+var noVoiceTried = false;
+function enableBeepMode(msg){
+  S.beep = true;
+  render(); save();
+  refreshVoiceHint();
+  if (msg) toast(msg, 2800);
+}
 function unlockAudio(){
+  ac();                                   // 唤醒 Web Audio（提示音用）
+  pickVoice();
   if (!speechOK) {
-    toast('当前浏览器不支持语音播报，请用 Safari / Chrome 打开', 3200);
+    if (!noVoiceTried) {
+      noVoiceTried = true;
+      elOptSound.disabled = false;
+      enableBeepMode('此浏览器不支持语音朗读，已改用提示音播报');
+    }
   } else {
-    try {
-      pickVoice();
-      var u = new SpeechSynthesisUtterance(' ');
-      u.volume = 0; u.lang = 'zh-CN';
-      if (zhVoice) u.voice = zhVoice;
-      window.speechSynthesis.speak(u);
-    } catch (e) {}
+    warmUp();
+    // 语音列表是异步的：1.2 秒后仍然一条都没有，就认定没有中文引擎并降级
+    setTimeout(function(){
+      if (!noVoiceTried && speechOK && !zhVoice && voices.length === 0) {
+        noVoiceTried = true;
+        enableBeepMode('此浏览器没有中文语音引擎，已改用提示音播报');
+      }
+    }, 1200);
   }
   keepAwake();
   document.removeEventListener('pointerdown', unlockAudio);
@@ -669,9 +882,11 @@ function unlockAudio(){
 document.addEventListener('pointerdown', unlockAudio, { once: true });
 document.addEventListener('touchstart', unlockAudio, { once: true, passive: true });
 
-if (!speechOK) {
-  elOptSound.disabled = true;
-  $('hintText').textContent = '当前浏览器不支持语音合成，比分仍可正常记录；建议用手机自带 Safari / Chrome 打开本页。';
+refreshVoiceHint();
+if (!speechOK && !hasAnyVoice()) {
+  $('hintText').innerHTML = '小提示：请把手机媒体音量调大、并关闭静音开关。' +
+    '当前浏览器没有语音朗读接口，已自动改用<b>提示音</b>播报比分（高音=先出现的那一方）；' +
+    '想要真人中文朗读，请用 Chrome 浏览器打开本页。';
 }
 
 toast('点左边/右边区域加 1 分');
